@@ -131,26 +131,6 @@ function normalizeText(value) {
   return String(value || '').trim();
 }
 
-function summarizeSession(session) {
-  const current = currentSection(session);
-  return {
-    id: session.session_id,
-    applicantId: session.applicant_id,
-    visitorType: session.visitor_type,
-    engagementStatus: session.engagement_status,
-    agreementStarted: Boolean(session.agreement_started),
-    currentSectionIndex: session.current_section_index,
-    currentSection: current ? current.title : null,
-    completedSections: session.completed_sections || [],
-    reviewComplete: Boolean(session.review_complete),
-    submittedAt: session.submitted_at,
-    status: session.status,
-    totalSections: agreementSections.length,
-    answers: session.answers || {},
-    events: (session.events || []).slice(-10)
-  };
-}
-
 function makeSession(applicantId = 'guest') {
   const now = new Date().toISOString();
   return {
@@ -165,9 +145,28 @@ function makeSession(applicantId = 'guest') {
     review_complete: 0,
     answers: {},
     events: [],
-    completed_sections: [],
     created_at: now,
     updated_at: now
+  };
+}
+
+function getSessionSummary(session) {
+  const current = currentSection(session);
+  return {
+    id: session.session_id,
+    applicantId: session.applicant_id,
+    visitorType: session.visitor_type,
+    engagementStatus: session.engagement_status,
+    agreementStarted: Boolean(session.agreement_started),
+    currentSectionIndex: session.current_section_index,
+    currentSection: current ? current.title : null,
+    totalSections: agreementSections.length,
+    completedSections: session.completed_sections || [],
+    reviewComplete: Boolean(session.review_complete),
+    submittedAt: session.submitted_at,
+    status: session.status,
+    answers: session.answers || {},
+    events: (session.events || []).slice(-10)
   };
 }
 
@@ -184,22 +183,6 @@ function setEngagementStatus(session, status, visitorType) {
 
 async function saveSession(session) {
   if (!db) return session;
-
-  const row = {
-    session_id: session.session_id,
-    applicant_id: session.applicant_id,
-    visitor_type: session.visitor_type,
-    engagement_status: session.engagement_status,
-    agreement_started: session.agreement_started ? 1 : 0,
-    current_section_index: session.current_section_index,
-    status: session.status,
-    submitted_at: session.submitted_at,
-    review_complete: session.review_complete ? 1 : 0,
-    answers_json: JSON.stringify(session.answers || {}),
-    events_json: JSON.stringify(session.events || []),
-    updated_at: session.updated_at,
-    created_at: session.created_at
-  };
 
   await db.run(
     `INSERT INTO sessions (
@@ -220,19 +203,19 @@ async function saveSession(session) {
       events_json = excluded.events_json,
       updated_at = excluded.updated_at`,
     [
-      row.session_id,
-      row.applicant_id,
-      row.visitor_type,
-      row.engagement_status,
-      row.agreement_started,
-      row.current_section_index,
-      row.status,
-      row.submitted_at,
-      row.review_complete,
-      row.answers_json,
-      row.events_json,
-      row.created_at,
-      row.updated_at
+      session.session_id,
+      session.applicant_id,
+      session.visitor_type,
+      session.engagement_status,
+      session.agreement_started ? 1 : 0,
+      session.current_section_index,
+      session.status,
+      session.submitted_at,
+      session.review_complete ? 1 : 0,
+      JSON.stringify(session.answers || {}),
+      JSON.stringify(session.events || []),
+      session.created_at,
+      session.updated_at
     ]
   );
 
@@ -244,7 +227,7 @@ async function getSessionById(sessionId) {
   const row = await db.get('SELECT * FROM sessions WHERE session_id = ?', [sessionId]);
   if (!row) return null;
 
-  const session = {
+  return {
     session_id: row.session_id,
     applicant_id: row.applicant_id,
     visitor_type: row.visitor_type,
@@ -256,18 +239,10 @@ async function getSessionById(sessionId) {
     review_complete: Boolean(row.review_complete),
     answers: parseJson(row.answers_json, {}),
     events: parseJson(row.events_json, []),
-    completed_sections: parseJson(row.completed_sections_json || '[]', []),
     created_at: row.created_at,
-    updated_at: row.updated_at
+    updated_at: row.updated_at,
+    completed_sections: []
   };
-
-  // Backward-compatible fallback for older rows without completed_sections_json.
-  const completed = parseJson(row.completed_sections_json, []);
-  if (Array.isArray(completed) && completed.length) {
-    session.completed_sections = completed;
-  }
-
-  return session;
 }
 
 function isRequiredAnswered(session, section) {
@@ -275,6 +250,19 @@ function isRequiredAnswered(session, section) {
     const value = session.answers[question.key];
     return !question.required || (typeof value === 'string' && value.trim().length > 0);
   });
+}
+
+function getCompletionProgress(session) {
+  const totalQuestions = agreementSections.reduce((count, section) => count + section.questions.length, 0);
+  const answeredQuestions = Object.keys(session.answers || {}).length;
+  const percent = Math.min(100, Math.round((answeredQuestions / totalQuestions) * 100));
+
+  return {
+    totalQuestions,
+    answeredQuestions,
+    percent,
+    remaining: Math.max(0, totalQuestions - answeredQuestions)
+  };
 }
 
 function answerQuestion(session, questionKey, rawAnswer) {
@@ -304,7 +292,7 @@ function answerQuestion(session, questionKey, rawAnswer) {
 
   const sectionCompleted = isRequiredAnswered(session, section);
   if (sectionCompleted) {
-    session.completed_sections = Array.from(new Set([...session.completed_sections, section.id]));
+    session.completed_sections = Array.from(new Set([...(session.completed_sections || []), section.id]));
     session.current_section_index += 1;
     recordEvent(session, 'section_completed', section.title);
 
@@ -392,10 +380,11 @@ function generateReply(session, message) {
     session.visitor_type = 'applicant';
     setEngagementStatus(session, 'agreement_in_progress', 'applicant');
     const current = currentSection(session);
+    const progress = getCompletionProgress(session);
     if (!current) {
-      return 'The agreement walkthrough is complete. Please review before submitting.';
+      return `The agreement walkthrough is complete. You have answered ${progress.answeredQuestions} of ${progress.totalQuestions} required questions. Please review before submitting.`;
     }
-    return `${current.title}\n\n${current.intro}\n\n${current.clause}\n\n${current.plainLanguage}\n\n${current.questions.map((q) => q.prompt).join('\n')}`;
+    return `${current.title} (Section ${session.current_section_index + 1} of ${agreementSections.length})\n\n${current.intro}\n\n${current.clause}\n\n${current.plainLanguage}\n\n${current.questions.map((q) => q.prompt).join('\n')}`;
   }
 
   if (/(hello|hi|hey|good morning|good evening)/.test(lower)) {
@@ -430,12 +419,14 @@ app.post('/api/chat', async (req, res) => {
   }
 
   const reply = generateReply(session, message);
+  const progress = getCompletionProgress(session);
   await saveSession(session);
 
   return res.json({
     sessionId: session.session_id,
     reply,
-    session: summarizeSession(session)
+    progress,
+    session: getSessionSummary(session)
   });
 });
 
@@ -448,12 +439,14 @@ app.post('/api/agreement/start', async (req, res) => {
   await saveSession(session);
 
   const current = currentSection(session);
+  const progress = getCompletionProgress(session);
   return res.json({
     sessionId: session.session_id,
-    session: summarizeSession(session),
+    progress,
+    session: getSessionSummary(session),
     botMessage: {
       type: 'section_start',
-      text: `${current.title}\n\n${current.intro}\n\n${current.clause}\n\n${current.plainLanguage}\n\n${current.questions.map((q) => q.prompt).join('\n')}`
+      text: `${current.title} (Section ${session.current_section_index + 1} of ${agreementSections.length})\n\n${current.intro}\n\n${current.clause}\n\n${current.plainLanguage}\n\n${current.questions.map((q) => q.prompt).join('\n')}`
     }
   });
 });
@@ -473,6 +466,7 @@ app.post('/api/agreement/answer', async (req, res) => {
 
   session.agreement_started = 1;
   setEngagementStatus(session, 'agreement_in_progress', 'applicant');
+  const progress = getCompletionProgress(session);
   await saveSession(session);
 
   return res.json({
@@ -480,7 +474,8 @@ app.post('/api/agreement/answer', async (req, res) => {
     success: true,
     sectionComplete: result.sectionComplete,
     message: result.message,
-    session: summarizeSession(session)
+    progress,
+    session: getSessionSummary(session)
   });
 });
 
@@ -505,7 +500,8 @@ app.post('/api/agreement/review', async (req, res) => {
 
   return res.json({
     success: true,
-    session: summarizeSession(session),
+    session: getSessionSummary(session),
+    progress: getCompletionProgress(session),
     missing,
     botMessage: {
       type: 'review',
@@ -536,7 +532,8 @@ app.post('/api/agreement/submit', async (req, res) => {
     return res.status(400).json({
       error: 'Submission is blocked until required responses are complete and the final acknowledgment is explicitly provided.',
       missing,
-      session: summarizeSession(session)
+      progress: getCompletionProgress(session),
+      session: getSessionSummary(session)
     });
   }
 
@@ -549,7 +546,8 @@ app.post('/api/agreement/submit', async (req, res) => {
 
   return res.json({
     success: true,
-    session: summarizeSession(session),
+    session: getSessionSummary(session),
+    progress: getCompletionProgress(session),
     botMessage: {
       type: 'submit',
       text: 'Agreement submitted successfully. This does not mean approval, payment verification, or access release has been granted.'
@@ -575,7 +573,6 @@ app.get('/api/dashboard/summary', async (req, res) => {
 
   for (const row of rows) {
     summary.totalSessions += Number(row.total || 0);
-
     if (row.engagement_status === 'browsing_or_inquiry') summary.browsing_or_inquiry += Number(row.total || 0);
     if (row.engagement_status === 'agreement_in_progress') summary.agreement_in_progress += Number(row.total || 0);
     if (row.engagement_status === 'awaiting_payment') summary.awaiting_payment += Number(row.total || 0);
@@ -591,26 +588,19 @@ app.get('/api/dashboard/summary', async (req, res) => {
 
 app.get('/api/sessions', async (req, res) => {
   const rows = await db.all('SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 20');
-  const sessions = rows.map((row) => ({
-    ...summarizeSession({
-      session_id: row.session_id,
-      applicant_id: row.applicant_id,
-      visitor_type: row.visitor_type,
-      engagement_status: row.engagement_status,
-      agreement_started: Boolean(row.agreement_started),
-      current_section_index: Number(row.current_section_index || 0),
-      status: row.status,
-      submitted_at: row.submitted_at,
-      review_complete: Boolean(row.review_complete),
-      answers: parseJson(row.answers_json, {}),
-      events: parseJson(row.events_json, []),
-      completed_sections: parseJson(row.completed_sections_json, []),
-      created_at: row.created_at,
-      updated_at: row.updated_at
+  const result = rows.map((row) => ({
+    sessionId: row.session_id,
+    applicantId: row.applicant_id,
+    engagementStatus: row.engagement_status,
+    currentSectionIndex: row.current_section_index,
+    status: row.status,
+    submittedAt: row.submitted_at,
+    progress: getCompletionProgress({
+      answers: parseJson(row.answers_json, {})
     })
   }));
 
-  return res.json({ sessions });
+  return res.json({ sessions: result });
 });
 
 app.get('*', (req, res) => {
