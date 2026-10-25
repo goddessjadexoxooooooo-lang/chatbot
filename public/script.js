@@ -18,7 +18,7 @@ function addMessage(text, sender) {
 function updateProgress(data) {
   if (!data || !data.progress) return;
 
-  const { answered, total, remaining } = data.progress;
+  const { answered, total } = data.progress;
   progressTextEl.textContent = `${answered} / ${total} complete`;
   applicationStatusEl.textContent = data.status || 'In progress';
 
@@ -32,22 +32,22 @@ async function startApplicationIfNeeded() {
   let applicationId = localStorage.getItem(storageKey);
 
   if (!applicationId) {
-    const response = await fetch('/api/chat', {
+    const response = await fetch('/api/applications', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: 'begin agreement walkthrough' }),
     });
 
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Unable to start application');
 
-    localStorage.setItem(storageKey, data.applicationId);
-    addMessage(data.reply, 'bot');
+    localStorage.setItem(storageKey, data.application.id);
+    applicationIdEl.textContent = data.application.id.slice(0, 8);
+    addMessage(`We are beginning the agreement walkthrough. ${data.currentStep ? data.currentStep.question : 'Please review your answers.'}`, 'bot');
     updateProgress(data);
     return;
   }
 
-  const response = await fetch(`/api/application/${applicationId}`);
+  const response = await fetch(`/api/applications/${applicationId}`);
   const data = await response.json();
   if (!response.ok) {
     localStorage.removeItem(storageKey);

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <style>
+      .admin-page {
+        max-width: 1000px;
+        margin: 40px auto;
+        background: white;
+        border: 1px solid #dbe3ee;
+        border-radius: 18px;
+        padding: 24px;
+      }
+
+      .apps-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 20px;
+      }
+
+      .apps-table th, .apps-table td {
+        border: 1px solid #dbe3ee;
+        padding: 10px 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .apps-table th {
+        background: #eef2ff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="admin-page">
+      <h1>Admin Dashboard</h1>
+      <p>Review agreement progress, payment status, approval status, and access authorization.</p>
+      <div id="admin-container"></div>
+    </div>
+
+    <script src="/admin.js"></script>
+  </body>
+</html>

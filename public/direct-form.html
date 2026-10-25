@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Direct Agreement Form</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <style>
+      .form-page {
+        max-width: 760px;
+        margin: 40px auto;
+        background: white;
+        border: 1px solid #dbe3ee;
+        border-radius: 18px;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+        padding: 24px;
+      }
+
+      .multi-field {
+        display: grid;
+        gap: 18px;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .field label {
+        font-weight: 700;
+      }
+
+      .field input, .field textarea {
+        width: 100%;
+        padding: 12px 14px;
+        border: 1px solid #dbe3ee;
+        border-radius: 10px;
+        font-size: 1rem;
+      }
+
+      .field textarea {
+        min-height: 120px;
+      }
+
+      .actions {
+        display: flex;
+        gap: 12px;
+        margin-top: 18px;
+      }
+
+      .actions button {
+        padding: 12px 18px;
+        border: none;
+        border-radius: 10px;
+        cursor: pointer;
+        font-size: 1rem;
+      }
+
+      .primary {
+        background: #1d4ed8;
+        color: white;
+      }
+
+      .secondary {
+        background: #e2e8f0;
+        color: #1f2937;
+      }
+
+      .status-box {
+        margin-top: 16px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: #eff6ff;
+        color: #1e3a8a;
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="form-page">
+      <h1>Agreement Direct Form</h1>
+      <p>This form uses the same application record as the chatbot. Your answers are preserved in the same underlying agreement workflow.</p>
+
+      <form id="direct-form" class="multi-field">
+        <div class="field">
+          <label for="fullName">Full name</label>
+          <input id="fullName" name="fullName" type="text" required />
+        </div>
+
+        <div class="field">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" required />
+        </div>
+
+        <div class="field">
+          <label for="agreementAcknowledgement">Agreement acknowledgment</label>
+          <textarea id="agreementAcknowledgement" name="agreementAcknowledgement" required placeholder="Type: I acknowledge that I have reviewed the agreement and agree to its terms."></textarea>
+        </div>
+
+        <div class="field">
+          <label for="signature">Final signature</label>
+          <input id="signature" name="signature" type="text" required />
+        </div>
+
+        <div class="actions">
+          <button type="submit" class="primary">Save agreement</button>
+          <button type="button" class="secondary" id="submitAgreement">Submit agreement</button>
+        </div>
+      </form>
+
+      <div class="status-box" id="statusBox"></div>
+    </div>
+
+    <script src="/direct-form.js"></script>
+  </body>
+</html>
