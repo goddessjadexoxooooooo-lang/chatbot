@@ -1,5 +1,7 @@
 const express = require('express');
 const path = require('path');
+const sqlite3 = require('sqlite3').verbose();
+const { open } = require('sqlite');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -73,44 +75,199 @@ const faqLibrary = {
   default: 'I can explain the current agreement section in plain language, but I cannot confirm a rule or exception that is not covered by the official agreement or the approved FAQ. Please contact Goddess Jade directly for any unclear policy matter.'
 };
 
-const sessions = new Map();
+let db;
 
-function makeSession(applicantId = 'guest') {
-  return {
-    id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    applicantId,
-    createdAt: new Date().toISOString(),
-    lastUpdated: new Date().toISOString(),
-    visitorType: 'browsing',
-    engagementStatus: 'browsing_or_inquiry',
-    agreementStarted: false,
-    currentSectionIndex: 0,
-    answers: {},
-    completedSections: [],
-    reviewComplete: false,
-    submittedAt: null,
-    status: 'in_progress',
-    reminderState: { firstSent: false, secondSent: false },
-    events: [],
-    version: 'No Nut November 2026 Agreement - Prototype'
-  };
+async function initDatabase() {
+  db = await open({
+    filename: path.join(__dirname, 'chatbot.db'),
+    driver: sqlite3.Database
+  });
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      session_id TEXT PRIMARY KEY,
+      applicant_id TEXT DEFAULT 'guest',
+      visitor_type TEXT DEFAULT 'browsing',
+      engagement_status TEXT DEFAULT 'browsing_or_inquiry',
+      agreement_started INTEGER DEFAULT 0,
+      current_section_index INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'in_progress',
+      submitted_at TEXT,
+      review_complete INTEGER DEFAULT 0,
+      answers_json TEXT DEFAULT '{}',
+      events_json TEXT DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  return db;
 }
 
-function recordEvent(session, type, note = '') {
-  session.events.push({ type, note, at: new Date().toISOString() });
-  session.lastUpdated = new Date().toISOString();
+function parseJson(value, fallback) {
+  try {
+    const parsed = JSON.parse(value || 'null');
+    return parsed ?? fallback;
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function currentSection(session) {
+  return agreementSections[session.current_section_index] || null;
 }
 
 function normalizeText(value) {
   return String(value || '').trim();
 }
 
-function getSession(sessionId) {
-  return sessions.get(sessionId);
+function summarizeSession(session) {
+  const current = currentSection(session);
+  return {
+    id: session.session_id,
+    applicantId: session.applicant_id,
+    visitorType: session.visitor_type,
+    engagementStatus: session.engagement_status,
+    agreementStarted: Boolean(session.agreement_started),
+    currentSectionIndex: session.current_section_index,
+    currentSection: current ? current.title : null,
+    completedSections: session.completed_sections || [],
+    reviewComplete: Boolean(session.review_complete),
+    submittedAt: session.submitted_at,
+    status: session.status,
+    totalSections: agreementSections.length,
+    answers: session.answers || {},
+    events: (session.events || []).slice(-10)
+  };
 }
 
-function currentSection(session) {
-  return agreementSections[session.currentSectionIndex] || null;
+function makeSession(applicantId = 'guest') {
+  const now = new Date().toISOString();
+  return {
+    session_id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    applicant_id: applicantId,
+    visitor_type: 'browsing',
+    engagement_status: 'browsing_or_inquiry',
+    agreement_started: 0,
+    current_section_index: 0,
+    status: 'in_progress',
+    submitted_at: null,
+    review_complete: 0,
+    answers: {},
+    events: [],
+    completed_sections: [],
+    created_at: now,
+    updated_at: now
+  };
+}
+
+function recordEvent(session, type, note = '') {
+  session.events.push({ type, note, at: new Date().toISOString() });
+  session.updated_at = new Date().toISOString();
+}
+
+function setEngagementStatus(session, status, visitorType) {
+  session.engagement_status = status;
+  if (visitorType) session.visitor_type = visitorType;
+  recordEvent(session, 'engagement_status_changed', `${status}:${visitorType || session.visitor_type}`);
+}
+
+async function saveSession(session) {
+  if (!db) return session;
+
+  const row = {
+    session_id: session.session_id,
+    applicant_id: session.applicant_id,
+    visitor_type: session.visitor_type,
+    engagement_status: session.engagement_status,
+    agreement_started: session.agreement_started ? 1 : 0,
+    current_section_index: session.current_section_index,
+    status: session.status,
+    submitted_at: session.submitted_at,
+    review_complete: session.review_complete ? 1 : 0,
+    answers_json: JSON.stringify(session.answers || {}),
+    events_json: JSON.stringify(session.events || []),
+    updated_at: session.updated_at,
+    created_at: session.created_at
+  };
+
+  await db.run(
+    `INSERT INTO sessions (
+      session_id, applicant_id, visitor_type, engagement_status, agreement_started,
+      current_section_index, status, submitted_at, review_complete, answers_json,
+      events_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      applicant_id = excluded.applicant_id,
+      visitor_type = excluded.visitor_type,
+      engagement_status = excluded.engagement_status,
+      agreement_started = excluded.agreement_started,
+      current_section_index = excluded.current_section_index,
+      status = excluded.status,
+      submitted_at = excluded.submitted_at,
+      review_complete = excluded.review_complete,
+      answers_json = excluded.answers_json,
+      events_json = excluded.events_json,
+      updated_at = excluded.updated_at`,
+    [
+      row.session_id,
+      row.applicant_id,
+      row.visitor_type,
+      row.engagement_status,
+      row.agreement_started,
+      row.current_section_index,
+      row.status,
+      row.submitted_at,
+      row.review_complete,
+      row.answers_json,
+      row.events_json,
+      row.created_at,
+      row.updated_at
+    ]
+  );
+
+  return session;
+}
+
+async function getSessionById(sessionId) {
+  if (!db) return null;
+  const row = await db.get('SELECT * FROM sessions WHERE session_id = ?', [sessionId]);
+  if (!row) return null;
+
+  const session = {
+    session_id: row.session_id,
+    applicant_id: row.applicant_id,
+    visitor_type: row.visitor_type,
+    engagement_status: row.engagement_status,
+    agreement_started: Boolean(row.agreement_started),
+    current_section_index: Number(row.current_section_index || 0),
+    status: row.status,
+    submitted_at: row.submitted_at,
+    review_complete: Boolean(row.review_complete),
+    answers: parseJson(row.answers_json, {}),
+    events: parseJson(row.events_json, []),
+    completed_sections: parseJson(row.completed_sections_json || '[]', []),
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+
+  // Backward-compatible fallback for older rows without completed_sections_json.
+  const completed = parseJson(row.completed_sections_json, []);
+  if (Array.isArray(completed) && completed.length) {
+    session.completed_sections = completed;
+  }
+
+  return session;
 }
 
 function isRequiredAnswered(session, section) {
@@ -118,31 +275,6 @@ function isRequiredAnswered(session, section) {
     const value = session.answers[question.key];
     return !question.required || (typeof value === 'string' && value.trim().length > 0);
   });
-}
-
-function getSessionSummary(session) {
-  return {
-    id: session.id,
-    applicantId: session.applicantId,
-    visitorType: session.visitorType,
-    engagementStatus: session.engagementStatus,
-    agreementStarted: session.agreementStarted,
-    currentSectionIndex: session.currentSectionIndex,
-    currentSection: currentSection(session)?.title || null,
-    completedSections: session.completedSections,
-    reviewComplete: session.reviewComplete,
-    submittedAt: session.submittedAt,
-    status: session.status,
-    totalSections: agreementSections.length,
-    answers: session.answers,
-    events: session.events.slice(-10)
-  };
-}
-
-function setEngagementStatus(session, status, visitorType) {
-  session.engagementStatus = status;
-  if (visitorType) session.visitorType = visitorType;
-  recordEvent(session, 'engagement_status_changed', `${status}:${visitorType || session.visitorType}`);
 }
 
 function answerQuestion(session, questionKey, rawAnswer) {
@@ -167,12 +299,13 @@ function answerQuestion(session, questionKey, rawAnswer) {
   }
 
   session.answers[questionKey] = answer;
+  session.updated_at = new Date().toISOString();
   recordEvent(session, 'question_answered', `${questionKey}:${answer}`);
 
   const sectionCompleted = isRequiredAnswered(session, section);
   if (sectionCompleted) {
-    session.completedSections = Array.from(new Set([...session.completedSections, section.id]));
-    session.currentSectionIndex += 1;
+    session.completed_sections = Array.from(new Set([...session.completed_sections, section.id]));
+    session.current_section_index += 1;
     recordEvent(session, 'section_completed', section.title);
 
     const next = currentSection(session);
@@ -227,20 +360,20 @@ function generateReply(session, message) {
   }
 
   if (/(just looking|just browsing|lurking|lurker|curious|not sure)/.test(lower)) {
-    session.visitorType = 'browsing';
+    session.visitor_type = 'browsing';
     setEngagementStatus(session, 'browsing_or_inquiry', 'browsing');
     return 'That is okay. You can ask questions and explore the agreement before deciding whether to continue. If you want, I can explain the process in plain language and help you decide whether you want to begin.';
   }
 
   if (/(payment|paid|submit payment|payment instructions)/.test(lower)) {
-    session.visitorType = 'applicant';
+    session.visitor_type = 'applicant';
     setEngagementStatus(session, 'awaiting_payment', 'applicant');
     return 'Your application and payment are separate steps. The application is not approved until the required review and payment verification are complete. If you want, I can walk you through the payment instructions next.';
   }
 
   if (/(resume|continue|return|left off|stuck)/.test(lower)) {
-    session.agreementStarted = true;
-    session.visitorType = 'applicant';
+    session.agreement_started = 1;
+    session.visitor_type = 'applicant';
     setEngagementStatus(session, 'agreement_in_progress', 'applicant');
     const current = currentSection(session);
     return current
@@ -249,14 +382,14 @@ function generateReply(session, message) {
   }
 
   if (/(question|what does|explain|clarify|what am i agreeing to|what happens)/.test(lower)) {
-    session.visitorType = classifyVisitor(message);
-    setEngagementStatus(session, 'browsing_or_inquiry', session.visitorType === 'browsing' ? 'browsing' : 'inquiry');
+    session.visitor_type = classifyVisitor(message);
+    setEngagementStatus(session, 'browsing_or_inquiry', session.visitor_type === 'browsing' ? 'browsing' : 'inquiry');
     return faqAnswer(message);
   }
 
-  if (/(start|begin|apply|agreement)/.test(lower) || session.agreementStarted) {
-    session.agreementStarted = true;
-    session.visitorType = 'applicant';
+  if (/(start|begin|apply|agreement)/.test(lower) || session.agreement_started) {
+    session.agreement_started = 1;
+    session.visitor_type = 'applicant';
     setEngagementStatus(session, 'agreement_in_progress', 'applicant');
     const current = currentSection(session);
     if (!current) {
@@ -266,7 +399,7 @@ function generateReply(session, message) {
   }
 
   if (/(hello|hi|hey|good morning|good evening)/.test(lower)) {
-    session.visitorType = classifyVisitor(message);
+    session.visitor_type = classifyVisitor(message);
     setEngagementStatus(session, 'browsing_or_inquiry', 'inquiry');
     return 'Hi. I can explain the agreement, answer questions, and help you continue through the application if you are ready.';
   }
@@ -282,14 +415,14 @@ function generateReply(session, message) {
   return 'I can help explain the agreement, answer questions before you proceed, or continue the walkthrough when you are ready.';
 }
 
-app.post('/api/chat', (req, res) => {
+app.post('/api/chat', async (req, res) => {
   const { sessionId, message } = req.body || {};
-  let session = sessionId ? getSession(sessionId) : null;
+  let session = sessionId ? await getSessionById(sessionId) : null;
 
   if (!session) {
     session = makeSession('guest');
-    sessions.set(session.id, session);
     recordEvent(session, 'session_started', 'New visitor session created.');
+    await saveSession(session);
   }
 
   if (typeof message !== 'string' || !normalizeText(message)) {
@@ -297,27 +430,27 @@ app.post('/api/chat', (req, res) => {
   }
 
   const reply = generateReply(session, message);
-  const summary = getSessionSummary(session);
+  await saveSession(session);
 
   return res.json({
-    sessionId: session.id,
+    sessionId: session.session_id,
     reply,
-    session: summary
+    session: summarizeSession(session)
   });
 });
 
-app.post('/api/agreement/start', (req, res) => {
+app.post('/api/agreement/start', async (req, res) => {
   const { applicantId = 'guest' } = req.body || {};
   const session = makeSession(applicantId);
-  sessions.set(session.id, session);
-  session.agreementStarted = true;
+  session.agreement_started = 1;
   recordEvent(session, 'agreement_started', 'Applicant started the agreement walkthrough.');
   setEngagementStatus(session, 'agreement_in_progress', 'applicant');
+  await saveSession(session);
 
   const current = currentSection(session);
   return res.json({
-    sessionId: session.id,
-    session: getSessionSummary(session),
+    sessionId: session.session_id,
+    session: summarizeSession(session),
     botMessage: {
       type: 'section_start',
       text: `${current.title}\n\n${current.intro}\n\n${current.clause}\n\n${current.plainLanguage}\n\n${current.questions.map((q) => q.prompt).join('\n')}`
@@ -325,9 +458,9 @@ app.post('/api/agreement/start', (req, res) => {
   });
 });
 
-app.post('/api/agreement/answer', (req, res) => {
+app.post('/api/agreement/answer', async (req, res) => {
   const { sessionId, questionKey, answer } = req.body || {};
-  const session = getSession(sessionId);
+  const session = await getSessionById(sessionId);
 
   if (!session) {
     return res.status(404).json({ error: 'Session not found.' });
@@ -338,21 +471,22 @@ app.post('/api/agreement/answer', (req, res) => {
     return res.status(400).json({ error: result.message });
   }
 
-  session.agreementStarted = true;
+  session.agreement_started = 1;
   setEngagementStatus(session, 'agreement_in_progress', 'applicant');
+  await saveSession(session);
 
   return res.json({
-    sessionId: session.id,
+    sessionId: session.session_id,
     success: true,
     sectionComplete: result.sectionComplete,
     message: result.message,
-    session: getSessionSummary(session)
+    session: summarizeSession(session)
   });
 });
 
-app.post('/api/agreement/review', (req, res) => {
+app.post('/api/agreement/review', async (req, res) => {
   const { sessionId } = req.body || {};
-  const session = getSession(sessionId);
+  const session = await getSessionById(sessionId);
 
   if (!session) {
     return res.status(404).json({ error: 'Session not found.' });
@@ -365,12 +499,13 @@ app.post('/api/agreement/review', (req, res) => {
     }
   }
 
-  session.reviewComplete = true;
+  session.review_complete = true;
   recordEvent(session, 'review_started', missing.length ? `Missing sections: ${missing.join(', ')}` : 'Review completed.');
+  await saveSession(session);
 
   return res.json({
     success: true,
-    session: getSessionSummary(session),
+    session: summarizeSession(session),
     missing,
     botMessage: {
       type: 'review',
@@ -381,9 +516,9 @@ app.post('/api/agreement/review', (req, res) => {
   });
 });
 
-app.post('/api/agreement/submit', (req, res) => {
+app.post('/api/agreement/submit', async (req, res) => {
   const { sessionId, finalConfirmation } = req.body || {};
-  const session = getSession(sessionId);
+  const session = await getSessionById(sessionId);
 
   if (!session) {
     return res.status(404).json({ error: 'Session not found.' });
@@ -401,19 +536,20 @@ app.post('/api/agreement/submit', (req, res) => {
     return res.status(400).json({
       error: 'Submission is blocked until required responses are complete and the final acknowledgment is explicitly provided.',
       missing,
-      session: getSessionSummary(session)
+      session: summarizeSession(session)
     });
   }
 
   session.status = 'submitted';
-  session.submittedAt = new Date().toISOString();
-  session.reviewComplete = true;
+  session.submitted_at = new Date().toISOString();
+  session.review_complete = true;
   setEngagementStatus(session, 'agreement_completed', 'applicant');
   recordEvent(session, 'agreement_submitted', 'Agreement submitted; approval, payment verification, and access release remain separate steps.');
+  await saveSession(session);
 
   return res.json({
     success: true,
-    session: getSessionSummary(session),
+    session: summarizeSession(session),
     botMessage: {
       type: 'submit',
       text: 'Agreement submitted successfully. This does not mean approval, payment verification, or access release has been granted.'
@@ -421,35 +557,78 @@ app.post('/api/agreement/submit', (req, res) => {
   });
 });
 
-app.get('/api/dashboard/summary', (req, res) => {
-  const statuses = { browsing_or_inquiry: 0, agreement_in_progress: 0, awaiting_payment: 0, agreement_completed: 0, submitted: 0 };
+app.get('/api/dashboard/summary', async (req, res) => {
+  const rows = await db.all(`
+    SELECT engagement_status, status, COUNT(*) AS total
+    FROM sessions
+    GROUP BY engagement_status, status
+  `);
 
-  for (const session of sessions.values()) {
-    if (statuses[session.engagementStatus] !== undefined) {
-      statuses[session.engagementStatus] += 1;
-    }
-    if (session.status === 'submitted') {
-      statuses.submitted += 1;
-    }
+  const summary = {
+    totalSessions: 0,
+    browsing_or_inquiry: 0,
+    agreement_in_progress: 0,
+    awaiting_payment: 0,
+    agreement_completed: 0,
+    submitted: 0
+  };
+
+  for (const row of rows) {
+    summary.totalSessions += Number(row.total || 0);
+
+    if (row.engagement_status === 'browsing_or_inquiry') summary.browsing_or_inquiry += Number(row.total || 0);
+    if (row.engagement_status === 'agreement_in_progress') summary.agreement_in_progress += Number(row.total || 0);
+    if (row.engagement_status === 'awaiting_payment') summary.awaiting_payment += Number(row.total || 0);
+    if (row.engagement_status === 'agreement_completed') summary.agreement_completed += Number(row.total || 0);
+    if (row.status === 'submitted') summary.submitted += Number(row.total || 0);
   }
 
   return res.json({
-    summary: {
-      totalSessions: sessions.size,
-      browsing_or_inquiry: statuses.browsing_or_inquiry,
-      agreement_in_progress: statuses.agreement_in_progress,
-      awaiting_payment: statuses.awaiting_payment,
-      agreement_completed: statuses.agreement_completed,
-      submitted: statuses.submitted
-    },
+    summary,
     note: 'This is a prototype engagement summary. A real system should use authenticated applicant records and confirmed events only.'
   });
+});
+
+app.get('/api/sessions', async (req, res) => {
+  const rows = await db.all('SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 20');
+  const sessions = rows.map((row) => ({
+    ...summarizeSession({
+      session_id: row.session_id,
+      applicant_id: row.applicant_id,
+      visitor_type: row.visitor_type,
+      engagement_status: row.engagement_status,
+      agreement_started: Boolean(row.agreement_started),
+      current_section_index: Number(row.current_section_index || 0),
+      status: row.status,
+      submitted_at: row.submitted_at,
+      review_complete: Boolean(row.review_complete),
+      answers: parseJson(row.answers_json, {}),
+      events: parseJson(row.events_json, []),
+      completed_sections: parseJson(row.completed_sections_json, []),
+      created_at: row.created_at,
+      updated_at: row.updated_at
+    })
+  }));
+
+  return res.json({ sessions });
 });
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`Agreement chatbot prototype listening at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  initDatabase()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`Agreement chatbot prototype listening at http://localhost:${PORT}`);
+        console.log(`SQLite database ready at ${path.join(__dirname, 'chatbot.db')}`);
+      });
+    })
+    .catch((error) => {
+      console.error('Failed to initialize database:', error);
+      process.exit(1);
+    });
+}
+
+module.exports = { app, initDatabase };
